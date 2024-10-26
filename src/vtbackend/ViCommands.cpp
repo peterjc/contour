@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include <vtbackend/Terminal.h>
 #include <vtbackend/ViCommands.h>
+#include <vtbackend/ViInputHandler.h>
 #include <vtbackend/logging.h>
 #include <vtbackend/primitives.h>
 
@@ -195,7 +196,11 @@ bool ViCommands::jumpToNextMatch(unsigned count)
 {
     for (unsigned i = 0; i < count; ++i)
         if (auto const nextPosition = _terminal->searchNextMatch(cursorPosition))
+        {
+            inputLog()("jumpToNextMatch");
+            _jumpHistory.add(nextPosition.value());
             moveCursorTo(nextPosition.value());
+        }
         else
             return false;
 
@@ -206,7 +211,11 @@ bool ViCommands::jumpToPreviousMatch(unsigned count)
 {
     for (unsigned i = 0; i < count; ++i)
         if (auto const nextPosition = _terminal->searchPrevMatch(cursorPosition))
+        {
+            inputLog()("jumpToPreviousMatch");
+            _jumpHistory.add(nextPosition.value());
             moveCursorTo(nextPosition.value());
+        }
         else
             return false;
 
@@ -659,7 +668,7 @@ CellLocationRange ViCommands::translateToCellRange(TextObjectScope scope,
     return { a, b };
 }
 
-CellLocationRange ViCommands::translateToCellRange(ViMotion motion, unsigned count) const noexcept
+CellLocationRange ViCommands::translateToCellRange(ViMotion motion, unsigned count) noexcept
 {
     switch (motion)
     {
@@ -773,8 +782,13 @@ CellLocation ViCommands::globalCharDown(CellLocation location, char ch, unsigned
     return result;
 }
 
-CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count) const noexcept
+CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count) noexcept
 {
+    auto addJumpHistory = [this](CellLocation const& location) {
+        inputLog()("addJumpHistory: {}:{}", location.line, location.column);
+        _jumpHistory.add(location);
+        return location;
+    };
     switch (motion)
     {
         case ViMotion::CharLeft: // h
@@ -806,7 +820,8 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                 { LineOffset::cast_from(-_terminal->currentScreen().historyLineCount().as<int>()),
                   ColumnOffset(0) });
         case ViMotion::FileEnd: // G
-            return snapToCell({ _terminal->pageSize().lines.as<LineOffset>() - 1, ColumnOffset(0) });
+            return addJumpHistory(
+                snapToCell({ _terminal->pageSize().lines.as<LineOffset>() - 1, ColumnOffset(0) }));
         case ViMotion::PageTop: // <S-H>
             return snapToCell({ boxed_cast<LineOffset>(-_terminal->viewport().scrollOffset())
                                     + *_terminal->viewport().scrollOff(),
@@ -837,9 +852,9 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                          -_terminal->currentScreen().historyLineCount().as<LineOffset>()),
                      cursorPosition.column };
         case ViMotion::LinesCenter: // M
-            return { LineOffset::cast_from(_terminal->pageSize().lines / 2 - 1)
-                         - boxed_cast<LineOffset>(_terminal->viewport().scrollOffset()),
-                     cursorPosition.column };
+            return addJumpHistory({ LineOffset::cast_from(_terminal->pageSize().lines / 2 - 1)
+                                        - boxed_cast<LineOffset>(_terminal->viewport().scrollOffset()),
+                                    cursorPosition.column });
         case ViMotion::PageDown:
             return { min(cursorPosition.line + LineOffset::cast_from(_terminal->pageSize().lines / 2),
                          _terminal->pageSize().lines.as<LineOffset>() - 1),
@@ -864,16 +879,16 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                 prev.line = current.line;
                 current.line--;
             }
-            return snapToCell(current);
+            return addJumpHistory(snapToCell(current));
         }
         case ViMotion::GlobalCurlyOpenUp: // [[
-            return globalCharUp(cursorPosition, '{', count);
+            return addJumpHistory(globalCharUp(cursorPosition, '{', count));
         case ViMotion::GlobalCurlyOpenDown: // ]]
-            return globalCharDown(cursorPosition, '{', count);
+            return addJumpHistory(globalCharDown(cursorPosition, '{', count));
         case ViMotion::GlobalCurlyCloseUp: // []
-            return globalCharUp(cursorPosition, '}', count);
+            return addJumpHistory(globalCharUp(cursorPosition, '}', count));
         case ViMotion::GlobalCurlyCloseDown: // ][
-            return globalCharDown(cursorPosition, '}', count);
+            return addJumpHistory(globalCharDown(cursorPosition, '}', count));
         case ViMotion::LineMarkUp: // [m
         {
             auto const gridTop = -_terminal->currentScreen().historyLineCount().as<LineOffset>();
@@ -888,7 +903,7 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                     --result.line;
                 --count;
             }
-            return result;
+            return addJumpHistory(result);
         }
         case ViMotion::LineMarkDown: // ]m
         {
@@ -906,7 +921,7 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                 }
                 --count;
             }
-            return result;
+            return addJumpHistory(result);
         }
         case ViMotion::ParagraphForward: // }
         {
@@ -922,7 +937,7 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                 prev.line = current.line;
                 current.line++;
             }
-            return snapToCell(current);
+            return addJumpHistory(snapToCell(current));
         }
         case ViMotion::ParenthesisMatching: // % TODO
             return findMatchingPairFrom(cursorPosition);
@@ -938,7 +953,7 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
 
                 startPosition = *nextPosition;
             }
-            return startPosition;
+            return addJumpHistory(startPosition);
         }
         case ViMotion::SearchResultForward: // n
         {
@@ -951,7 +966,7 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
                     return cursorPosition;
                 startPosition = *nextPosition;
             }
-            return startPosition;
+            return addJumpHistory(startPosition);
         }
         case ViMotion::WordBackward: // b
         {
@@ -1065,6 +1080,9 @@ CellLocation ViCommands::translateToCellLocation(ViMotion motion, unsigned count
             if (isValidCharMove(_lastCharMotion))
                 return translateToCellLocation(invertCharMove(*_lastCharMotion), count);
             return cursorPosition;
+        case ViMotion::JumpToLastJumpPoint: return _jumpHistory.jumpToLast(cursorPosition);
+        case ViMotion::JumpToMarkUp: return _jumpHistory.jumpToMarkUp(cursorPosition);
+        case ViMotion::JumpToMarkDown: return _jumpHistory.jumpToMarkDown(cursorPosition);
     }
     crispy::unreachable();
 }
